@@ -17,7 +17,7 @@ resource "openstack_networking_subnet_v2" "subnets" {
   gateway_ip = "${lookup(var.subnets[count.index], "gateway_ip", "192.168.${count.index + 1}.1")}"
   allocation_pools = {
     start = "${lookup(var.subnets[count.index], "allocation_pools_start", "192.168.${count.index + 1}.2")}"
-    end = "${lookup(var.subnets[count.index], "allocation_pools_stop", "192.168.${count.index + 1}.254")}"
+    end = "${lookup(var.subnets[count.index], "allocation_pools_end", "192.168.${count.index + 1}.254")}"
   }
   dns_nameservers = "${var.dns_nameservers}"
   ip_version = "${lookup(var.subnets[count.index], "ip_version", "4")}"
