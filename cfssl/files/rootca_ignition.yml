@@ -1,0 +1,121 @@
+locksmith:
+  reboot_strategy: off
+
+passwd:
+  users:
+    - name: core
+      # "password"
+      # password_hash: $6$xasjQCudiCYYL4Is$LTuqEcjHuQrIXM7lF4/scN2YSjbaqiuud7s2rgPbVmgwYT3/YO5XK8APrLXuYKF7QoztZ5PJ8dVRYtwZ2Pqzb/
+      ssh_authorized_keys:
+        - ${public_key}
+
+storage:
+  files:
+    - path: /opt/cfssl/rootca-csr.json
+      filesystem: root
+      contents:
+        inline: |
+          {
+            "CN": "${ca_common_name}",
+            "key": {
+              "algo": "rsa",
+              "size": 2048
+            },
+            "names": [
+               {
+                 "C": "${country}",
+                 "L": "${city}",
+                 "O": "${organization}",
+                 "OU": "${organization_unit}",
+                 "ST": "${state}"
+               }
+            ]
+          }
+    - path: /opt/cfssl/entrypoint.sh
+      filesystem: root
+      contents:
+        inline: |
+          #!/bin/bash
+
+          if [[ ! -f ca.pem ]] || [[ ! -f ca-key.pem ]]; then
+            cfssl gencert -initca rootca-csr.json | cfssljson -bare ca
+          fi
+    - path: /opt/bin/neofetch
+      filesystem: root
+      mode: 0555
+      contents:
+        remote:
+          url: https://github.com/dylanaraps/neofetch/releases/download/5.0.0/neofetch
+          verification:
+            hash:
+              function: sha512
+              sum: d17d1b541b5f55d6614e3cee07205a23059245343a1b8fdc76d4ecc9c6ba900445aa39d4a6be29f8771225b51e3c292c2d94cb03f17fa84278e4046fd8009ad8
+    - path: /opt/installers/nvim.sh
+      filesystem: root
+      mode: 0544
+      contents:
+        inline: |
+          #!/bin/bash
+
+          cmd=$(command -v nvim)
+          [ ! -z "$cmd" ] && echo "nvim already installed at $cmd" | systemd-cat && exit 0
+
+          BASE_URL=https://github.com/neovim/neovim/releases/download
+          VERSION=0.3.0
+
+          wget --quiet $BASE_URL/v$VERSION/nvim.appimage
+          chmod +x nvim.appimage
+          # No FUSE, so need --appimage-extract
+          ./nvim.appimage --appimage-extract > /dev/null 2>&1
+          rm nvim.appimage
+          mv squashfs-root /opt/nvim
+          chmod 755 -R /opt/nvim
+          ln -s /opt/nvim/usr/bin/nvim /opt/bin/nvim
+      # TODO these minos installers can be generalized
+    - path: /opt/installers/tmux.sh
+      filesystem: root
+      mode: 0544
+      contents:
+        inline: |
+          #!/bin/bash
+
+          cmd=$(command -v tmux)
+          [ ! -z "$cmd" ] && echo "tmux already installed at $cmd" && exit 0
+
+          PACKAGE=tmux-1.9a.tar.xz
+
+          wget --quiet http://s.minos.io/archive/morpheus/x86_64/$PACKAGE
+          tar -C /opt -xf $PACKAGE
+          rm $PACKAGE
+    - path: /opt/installers/htop.sh
+      filesystem: root
+      mode: 0544
+      contents:
+        inline: |
+          #!/bin/bash
+
+          cmd=$(command -v htop)
+          [ ! -z "$cmd" ] && echo "htop already installed at $cmd" && exit 0
+
+          PACKAGE=htop-1.0.3.tar.xz
+
+          wget --quiet http://s.minos.io/archive/morpheus/x86_64/$PACKAGE
+          tar -C /opt -xf $PACKAGE
+          rm $PACKAGE
+
+systemd:
+  units:
+    - name: install-scripts.service
+      enabled: true
+      contents: |
+        [Unit]
+        Description=idempotent scripts to install statically linked programs
+
+        [Service]
+        Type=oneshot
+        ExecStart=/opt/installers/tmux.sh
+        ExecStart=/opt/installers/nvim.sh
+        ExecStart=/opt/installers/htop.sh
+
+        [Install]
+        WantedBy=multi-user.target
