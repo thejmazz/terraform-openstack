@@ -10,14 +10,85 @@
   gather_facts: false
 
   vars:
+    # {git,drone}.domain.tld
+    # Applies to web CSR, nginx, CoreDNS
+    domain: domain
+    tld: tld
+    # Docker
     docker_version: "17.06.2"
     docker_compose_version: "1.21.2"
-    ca_common_name: "Bootstrap CA"
-    country: "Country"
-    city: "City"
-    organization: "Organization"
-    organization_unit: "Organization Unit"
-    state: "State"
+    # CoreDNS
+    coredns_version: "1.2.0"
+    # Root CA CSR
+    rootca_csr_ca_common_name: "Bootstrap CA"
+    rootca_csr_country: "Country"
+    rootca_csr_city: "City"
+    rootca_csr_organization: "Bootstrap Organization"
+    rootca_csr_organization_unit: "Organization Unit"
+    rootca_csr_state: "State"
+    # Web CSR
+    # Common name will be '*.domain.tld'
+    web_csr_country: "Country"
+    web_csr_city: "City"
+    web_csr_organization: "Organization"
+    web_csr_organization_unit: "Organization Unit"
+    web_csr_state: "State"
+    # Nginx
+    web_cert_path: /etc/nginx/ssl/web.pem
+    web_tls_key_path: /etc/nginx/ssl/web-key.pem
+    # Gitea
+    # md5 + $(echo password | md5sum)
+    gitea_postgres_password: md5518cb1fc619543ab820c4f34649ecf2c
+    gitea_port: 3000
+    # Drone
+    drone_version: 0.8.5
+    drone_secret: mydronesecret
+    drone_admin: admin
+    drone_server_port: 8000
+    drone_server_grpc_port: 9000
+    # For convenience and terseness
+    local_ipv4: "{{ hostvars[inventory_hostname]['ansible_default_ipv4']['address'] }}"
+    # Depends on hostname actually being an IP
+    floating_ip: "{{ inventory_hostname }}"
+
+  handlers:
+    - name: restart_nginx
+      service:
+        daemon_reload: yes
+        name: nginx
+        state: restarted
+        enabled: yes
+    - name: generate_web_certs
+      shell: "source /etc/profile && cfssl gencert -ca=/etc/cfssl/ca.pem -ca-key=/etc/cfssl/ca-key.pem web.json | cfssljson -bare web"
+      args:
+        # creates: "{{ web_cert_path }}"
+        chdir: /etc/nginx/ssl
+        executable: /bin/bash
+      notify: restart_nginx
+    - name: restart_service_drone_server
+      service:
+        daemon_reload: yes
+        name: drone-server
+        state: restarted
+        enabled: yes
+    - name: restart_service_coredns
+      service:
+        daemon_reload: yes
+        name: coredns
+        state: restarted
+        enabled: yes
+    - name: restart_service_gitea
+      service:
+        daemon_reload: yes
+        name: gitea
+        state: restarted
+        enabled: yes
+    - name: reload_service_coredns
+      service:
+        daemon_reload: yes
+        name: coredns
+        state: reloaded
+        enabled: yes
 
   pre_tasks:
     - name: "Install python 2 in case not available"
@@ -26,9 +97,11 @@
       changed_when: output.stdout != ""
     - name: Gathering facts
       setup:
+
+      # will show changed every time. see: https://github.com/ansible/ansible/issues/27798
     - name: update apt cache
       apt: update_cache=yes
-      # will show changed every time. see: https://github.com/ansible/ansible/issues/27798
+
     - name: apt dist-upgrade
       apt: upgrade=dist
 
@@ -38,8 +111,11 @@
       docker_aufs_enabled: false
       daemon_json:
         storage-driver: overlay2
+        dns: [ "{{ local_ipv4 }}" ]
       pip_version_docker_compose: "{{docker_compose_version}}"
       docker_group_members: [ 'ubuntu' ]
+
+      # Needed for installing cfssl via `go get`
     - role: ansible-go
       go_tarball: go1.10.3.linux-amd64.tar.gz
       go_tarball_checksum: sha256:fa1b0e45d3b647c252f51f5e1204aba049cde4af177ef9f2181f43004f901035
@@ -47,6 +123,11 @@
       go_download_location: "https://dl.google.com/go/{{ go_tarball }}"
       # adds /etc/profile.d/{go-bin,go-path}.sh
       set_go_path: true
+
+      # Needed for Gitea DB
+    - role: geerlingguy.postgresql
+      postgresql_user: postgres
+      postgresql_group: postgres
 
   tasks:
     - name: install useful tools
@@ -63,9 +144,26 @@
       dpkg_selections:
         name: docker-ce
         selection: hold
-    - name: install gcc
-      apt: name=gcc
-    - name: Install go tools
+    - name: Ensure /opt/bin exists
+      file:
+        path: /opt/bin
+        state: directory
+        owner: root
+        group: root
+        mode: 0755
+    - name: Ensure /opt/src exists
+      file:
+        path: /opt/src
+        state: directory
+        owner: root
+        group: root
+        mode: 0755
+    # - name: install gcc
+    #   apt: name=gcc
+
+
+    # === CFSSL ===
+    - name: Install cfssl tools
       shell: "source /etc/profile && go get -u {{ item }}"
       args:
         # Use /bin/bash so we can call `source` instead of `.`, for readability
@@ -75,13 +173,7 @@
       with_items:
         - github.com/cloudflare/cfssl/cmd/cfssl
         - github.com/cloudflare/cfssl/cmd/cfssljson
-        - github.com/cloudflare/cfssl/cmd/multirootca
-        - code.gitea.io/gitea
-        - github.com/coredns/coredns
       changed_when: false
-
-
-    # === CFSSL ===
     - name: Ensure /etc/cfssl exists
       file:
         path: /etc/cfssl
@@ -97,18 +189,18 @@
         mode: 0400
         content: |
           {
-            "CN": "{{ ca_common_name }}",
+            "CN": "{{ rootca_csr_ca_common_name }}",
             "key": {
               "algo": "rsa",
               "size": 2048
             },
             "names": [
                {
-                 "C": "{{ country }}",
-                 "L": "{{ city }}",
-                 "O": "{{ organization }}",
-                 "OU": "{{ organization_unit }}",
-                 "ST": "{{ state }}"
+                 "C": "{{ rootca_csr_country }}",
+                 "L": "{{ rootca_csr_city }}",
+                 "O": "{{ rootca_csr_organization }}",
+                 "OU": "{{ rootca_csr_organization_unit }}",
+                 "ST": "{{ rootca_csr_state }}"
                }
             ]
           }
@@ -118,6 +210,405 @@
         creates: /etc/cfssl/ca.pem
         chdir: /etc/cfssl
         executable: /bin/bash
+    - name: Copy Root CA cert to local machine
+      fetch:
+        src: /etc/cfssl/ca.pem
+        dest: cacerts
+
+    # === ADD CA CERT TO SYSTEM ===
+    - name: Ensure local certs directory exists
+      file:
+        path: /usr/local/share/ca-certificates/cfssl
+        state: directory
+    - name: Install self signed root CA cert
+      copy:
+        remote_src: yes
+        src: /etc/cfssl/ca.pem
+        dest: /usr/local/share/ca-certificates/cfssl/ca.crt
+    - name: Update cert index
+      shell: /usr/sbin/update-ca-certificates
+      # only when previous task changed?
 
 
+    # === /etc/hosts ===
+    # It is too much trouble to add new entries into /etc/resolv.conf with
+    # cloud init on ubuntu, it will default to only using what is provided via
+    # OpenStack metadata service; and we cannot put "127.0.0.1" in the subnet's
+    # DNS. So, manually hosts entries for now.
+    - name: "Add {{ item }}.{{ domain }}.{{ tld }} to /etc/hosts"
+      lineinfile:
+        path: /etc/hosts
+        line: "{{ local_ipv4 }} {{ item }}.{{ domain }}.{{ tld }}"
+        state: present
+      with_items:
+        - git
+        - drone
 
+    # === NGINX ===
+    - name: Install nginx
+      apt: name=nginx
+    - name: Ensure /etc/nginx/ssl exists
+      file:
+        path: /etc/nginx/ssl
+        state: directory
+        owner: root
+        group: root
+        mode: 0744
+    - name: Copy website CSR
+      copy:
+        dest: /etc/nginx/ssl/web.json
+        owner: root
+        group: root
+        mode: 0744
+        content: |
+          {
+            "CN": "*.{{ domain }}.{{ tld }}",
+            "hosts": [
+                "{{ floating_ip }}",
+                "*.{{ domain }}.{{ tld }}"
+            ],
+            "key": {
+                "algo": "rsa",
+                "size": 2048
+            },
+            "names": [
+                {
+                  "C": "{{ web_csr_country }}",
+                  "L": "{{ web_csr_city }}",
+                  "O": "{{ web_csr_organization }}",
+                  "OU": "{{ web_csr_organization_unit }}",
+                  "ST": "{{ web_csr_state }}"
+                }
+            ]
+          }
+      notify: generate_web_certs
+    - shell: "source /etc/profile && cfssl gencert -ca=/etc/cfssl/ca.pem -ca-key=/etc/cfssl/ca-key.pem web.json | cfssljson -bare web"
+      args:
+        # creates: "{{ web_cert_path }}"
+        chdir: /etc/nginx/ssl
+        executable: /bin/bash
+      notify: restart_nginx
+    - name: Copy nginx configuration
+      copy:
+        dest: /etc/nginx/sites-available/default
+        owner: root
+        group: root
+        mode: 0644
+        content: |
+          server {
+                  listen 80;
+
+                  location / {
+                          return 301 https://$host$request_uri;
+                  }
+          }
+
+          server {
+                  listen 443 ssl;
+                  listen [::]:443 ssl;
+
+                  ssl_certificate {{ web_cert_path }};
+                  ssl_certificate_key {{ web_tls_key_path }};
+
+                  root /var/www/html;
+
+                  index index.html index.htm index.nginx-debian.html;
+
+                  server_name _;
+
+                  location / {
+                          # First attempt to serve request as file, then
+                          # as directory, then fall back to displaying a 404.
+                          try_files $uri $uri/ =404;
+                  }
+            }
+
+    # === COREDNS ===
+    - name: Download CoreDNS
+      get_url:
+        url: "https://github.com/coredns/coredns/releases/download/v{{ coredns_version }}/coredns_{{ coredns_version }}_linux_amd64.tgz"
+        dest: "/opt/src/coredns_{{ coredns_version }}_linux_amd64.tgz"
+    - name: Extract CoreDNS
+      unarchive:
+        remote_src: yes
+        src: "/opt/src/coredns_{{ coredns_version }}_linux_amd64.tgz"
+        dest: /opt/bin
+    - name: CoreDNS user
+      user:
+        name: coredns
+        home: /var/lib/coredns
+        system: yes
+    - name: Ensure /etc/coredns exists
+      file:
+        path: /etc/coredns
+        state: directory
+        owner: root
+        group: coredns
+        mode: 0774
+    - name: CoreDNS Configuration
+      copy:
+        dest: /etc/coredns/Corefile
+        owner: root
+        group: coredns
+        mode: 0664
+        content: |
+          . {
+            whoami
+            log
+            errors
+
+            # HARDCODED
+            forward . 192.168.0.2 192.168.0.3
+
+            # hosts plugin with inline content
+            hosts bootstrap.hosts {{ domain }}.{{ tld }} {
+              {{ floating_ip }} drone.{{ domain }}.{{ tld }}
+              {{ floating_ip }} git.{{ domain }}.{{ tld }}
+              fallthrough
+            }
+          }
+      notify: reload_service_coredns
+    - name: CoreDNS Systemd Service
+      copy:
+        dest: /etc/systemd/system/coredns.service
+        owner: root
+        group: root
+        mode: 0644
+        content: |
+          [Unit]
+          Description=CoreDNS DNS server
+          Documentation=https://coredns.io
+          After=network.target
+
+          [Service]
+          PermissionsStartOnly=true
+          LimitNOFILE=1048576
+          LimitNPROC=512
+          CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+          AmbientCapabilities=CAP_NET_BIND_SERVICE
+          NoNewPrivileges=true
+          User=coredns
+          WorkingDirectory=~
+          ExecStart=/opt/bin/coredns -conf=/etc/coredns/Corefile
+          ExecReload=/bin/kill -SIGUSR1 $MAINPID
+          Restart=on-failure
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: restart_service_coredns
+    - name: Start coredns service
+      service:
+        daemon_reload: yes
+        name: coredns
+        state: started
+        enabled: yes
+
+
+    # === GITEA ===
+    - name: Download Gitea binary
+      # TODO verify with gpg
+      get_url:
+        url: https://dl.gitea.io/gitea/1.5/gitea-1.5-linux-amd64
+        dest: /opt/bin/gitea
+        owner: root
+        group: root
+        mode: 0755
+    - name: Make a git user
+      user:
+        name: git
+    - name: Create Gitea directories owned by root
+      file:
+        path: "/var/lib/gitea/{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: 0755
+      with_items:
+        - custom
+        - public
+    - name: Create gitea directories owned by git
+      file:
+        path: /var/lib/gitea/{{ item }}
+        state: directory
+        owner: git
+        group: git
+        mode: 0750
+      with_items:
+        - data
+        - indexers
+        - log
+    - name: Create /etc/gitea
+      file:
+        path: /etc/gitea
+        state: directory
+        owner: root
+        group: git
+        mode: 0770
+    - name: Create gitea database
+      become: yes
+      become_user: postgres
+      postgresql_db:
+        name: gitea
+    - name: Create gitea postgresql user
+      become: yes
+      become_user: postgres
+      postgresql_user:
+        db: gitea
+        name: gitea
+        password: "{{ gitea_postgres_password }}"
+        priv: ALL
+    - name: Ensure Postgres gitea user does not have unnecessary privilege
+      become: yes
+      become_user: postgres
+      postgresql_user:
+        name: gitea
+        role_attr_flags: NOSUPERUSER,NOCREATEDB
+    - name: Ensure no other user can access gitea database
+      become: yes
+      become_user: postgres
+      postgresql_privs:
+        db: gitea
+        role: PUBLIC
+        type: database
+        priv: ALL
+        state: absent
+    - name: Create Gitea systemd unit
+      copy:
+        dest: /etc/systemd/system/gitea.service
+        owner: root
+        group: root
+        mode: 0644
+        content: |
+          [Unit]
+          Description=Gitea (Git with a cup of tea)
+          After=syslog.target
+          After=network.target
+          After=postgresql.service
+
+          [Service]
+          # Modify these two values and uncomment them if you have
+          # repos with lots of files and get an HTTP error 500 because
+          # of that
+          ###
+          #LimitMEMLOCK=infinity
+          #LimitNOFILE=65535
+          RestartSec=2s
+          Type=simple
+          User=git
+          Group=git
+          WorkingDirectory=/var/lib/gitea/
+          ExecStart=/opt/bin/gitea web -c /etc/gitea/app.ini
+          Restart=always
+          Environment=USER=git HOME=/home/git GITEA_WORK_DIR=/var/lib/gitea
+          # If you want to bind Gitea to a port below 1024 uncomment
+          # the two values below
+          ###
+          #CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+          #AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: restart_service_gitea
+    - name: Start Gitea service
+      service:
+        daemon_reload: yes
+        name: gitea
+        state: started
+        enabled: yes
+    - name: Copy Gitea nginx conf
+      template:
+        src: nginx-reverse-proxy.conf
+        dest: /etc/nginx/conf.d/gitea.conf
+        owner: root
+        group: root
+        mode: 0644
+      vars:
+        server_name: "git.{{ domain }}.{{ tld }}"
+        port: "{{ gitea_port }}"
+        ssl_certificate: "{{ web_cert_path }}"
+        ssl_certificate_key: "{{ web_tls_key_path }}"
+      notify: restart_nginx
+
+    # === DRONE SERVER ===
+    - name: Copy drone systemd unit
+      copy:
+        dest: /etc/systemd/system/drone-server.service
+        owner: root
+        group: root
+        mode: 0644
+        content: |
+          [Unit]
+          Description=Drone Server
+          After=docker.service
+          Requires=docker.service
+
+          [Service]
+          RestartSec=2s
+          TimeoutStartSec=0
+          Type=simple
+          User=root
+          Group=root
+          ExecStartPre=-/usr/bin/docker kill drone-server
+          ExecStartPre=-/usr/bin/docker rm drone-server
+          ExecStartPre=/usr/bin/docker pull drone/drone:{{ drone_version }}
+          ExecStart=/usr/bin/docker run --name drone-server -p {{ drone_server_port }}:8000 -p {{ drone_server_grpc_port }}:9000 -v var_lib_drone:/var/lib/drone --restart always -e DRONE_DEBUG=true -e DRONE_OPEN=true -e DRONE_HOST=http://{{ local_ipv4 }}:{{ drone_server_port }} -e DRONE_SECRET={{ drone_secret }} -e DRONE_GITEA=true -e DRONE_GITEA_URL=http://{{ local_ipv4 }}:{{ gitea_port }} -e DRONE_ADMIN={{ drone_admin }} -e DRONE_VOLUME=/etc/ssl/certs:/etc/ssl/certs drone/drone:{{ drone_version }}
+          Restart=always
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: restart_service_drone_server
+    - name: Start Drone Server service
+      service:
+        daemon_reload: yes
+        name: drone-server
+        state: started
+        enabled: yes
+    - name: Copy Drone server nginx conf
+      template:
+        src: nginx-reverse-proxy.conf
+        dest: /etc/nginx/conf.d/drone-server.conf
+        owner: root
+        group: root
+        mode: 0644
+      vars:
+        server_name: drone.{{ domain }}.{{ tld }}
+        port: "{{ drone_server_port }}"
+        ssl_certificate: "{{ web_cert_path }}"
+        ssl_certificate_key: "{{ web_tls_key_path }}"
+      notify: restart_nginx
+
+    # === DRONE AGENT ===
+    - name: Copy drone-agent systemd unit
+      copy:
+        dest: /etc/systemd/system/drone-agent.service
+        owner: root
+        group: root
+        mode: 0644
+        content: |
+          [Unit]
+          Description=Drone Agent
+          After=docker.service
+          Requires=docker.service
+          After=drone-server.service
+          Requires=drone-server.service
+
+          [Service]
+          RestartSec=2s
+          TimeoutStartSec=0
+          Type=simple
+          User=root
+          Group=root
+          ExecStartPre=-/usr/bin/docker kill drone-agent
+          ExecStartPre=-/usr/bin/docker rm drone-agent
+          ExecStartPre=/usr/bin/docker pull drone/drone:{{ drone_version }}
+          ExecStart=/usr/bin/docker run --name drone-agent -v /var/run/docker.sock:/var/run/docker.sock --restart always -e DRONE_DEBUG=true -e DRONE_SERVER={{ local_ipv4 }}:{{ drone_server_grpc_port }} -e DRONE_SECRET={{ drone_secret }} drone/agent:{{ drone_version }} agent
+          Restart=always
+
+          [Install]
+          WantedBy=multi-user.target
+    - name: Start Drone Agent service
+      service:
+        daemon_reload: yes
+        name: drone-agent
+        state: started
+        enabled: yes
