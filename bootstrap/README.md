@@ -185,6 +185,10 @@ what it does). Some general skills you may want to review are:
 
 ## Notes
 
+- RE. drone builds having access to self-signed CA certs: [comment](https://github.com/drone-plugins/drone-docker/issues/51#issuecomment-305694856)
+- RE. adding custom CA certs in alpine: [comment](https://github.com/gliderlabs/docker-alpine/issues/260#issuecomment-351128828)
+- RE. adding custom CA certs in ubuntu: [comment](https://askubuntu.com/questions/73287/how-do-i-install-a-root-certificate)
+
 - To see list of available facts:
 
   ```bash
