@@ -10,6 +10,10 @@
   gather_facts: false
 
   vars:
+    services:
+      - git
+      - drone
+      - minio
     # {git,drone}.domain.tld
     # Applies to web CSR, nginx, CoreDNS
     domain: domain
@@ -46,6 +50,8 @@
     drone_admin: admin
     drone_server_port: 8000
     drone_server_grpc_port: 9000
+    # Minio
+    minio_port: 9001
     # For convenience and terseness
     local_ipv4: "{{ hostvars[inventory_hostname]['ansible_default_ipv4']['address'] }}"
     # Depends on hostname actually being an IP
@@ -104,6 +110,11 @@
 
     - name: apt dist-upgrade
       apt: upgrade=dist
+    - name: Disable unattended upgrades
+      lineinfile:
+        path: /etc/apt/apt.conf.d/20auto-upgrades
+        line: APT::Periodic::Unattended-Upgrade "0";
+        regexp: ^APT::Periodic::Unattended-Upgrade "1";$
 
   roles:
     - role: angstwad.docker_ubuntu
@@ -112,6 +123,15 @@
       daemon_json:
         storage-driver: overlay2
         dns: [ "{{ local_ipv4 }}" ]
+        mtu: 1300
+        # make a network with --opt com.docker.network.driver.mtu=1300 <name> (or anything lower than hosts interface of the default gateway)
+        # network_mode: <name> (need to enable trusted repo by drone admin)
+        # NOTE need to put 172.20.254.254 in /etc/resolv.conf to avoid conflict with floating ips
+        # NOTE mtu dynamically changes when containers are in network!!!
+        # NOTE to do a full cleanup, even if interfaces missing, do a full restart
+        # NOTE things like weave net have docs for this sort of complex stuff...docker docs are weak...
+        # e.g. https://www.weave.works/docs/net/latest/tasks/manage/fastdp/#packet-size-mtu
+        # would be nice if you could set a global default MTU - https://github.com/moby/moby/issues/34981#issuecomment-346379091
       pip_version_docker_compose: "{{docker_compose_version}}"
       docker_group_members: [ 'ubuntu' ]
 
@@ -158,8 +178,14 @@
         owner: root
         group: root
         mode: 0755
-    # - name: install gcc
-    #   apt: name=gcc
+    - name: Add /opt/bin to PATH
+      copy:
+        dest: /etc/profile.d/opt-bin.sh
+        owner: root
+        group: root
+        mode: 0644
+        content: |
+          export PATH=$PATH:/opt/bin
 
 
     # === CFSSL ===
@@ -234,15 +260,13 @@
     # It is too much trouble to add new entries into /etc/resolv.conf with
     # cloud init on ubuntu, it will default to only using what is provided via
     # OpenStack metadata service; and we cannot put "127.0.0.1" in the subnet's
-    # DNS. So, manually hosts entries for now.
+    # DNS. So, manually add hosts entries for now.
     - name: "Add {{ item }}.{{ domain }}.{{ tld }} to /etc/hosts"
       lineinfile:
         path: /etc/hosts
         line: "{{ local_ipv4 }} {{ item }}.{{ domain }}.{{ tld }}"
         state: present
-      with_items:
-        - git
-        - drone
+      with_items: "{{ services }}"
 
     # === NGINX ===
     - name: Install nginx
@@ -282,7 +306,8 @@
             ]
           }
       notify: generate_web_certs
-    - shell: "source /etc/profile && cfssl gencert -ca=/etc/cfssl/ca.pem -ca-key=/etc/cfssl/ca-key.pem web.json | cfssljson -bare web"
+    - name: Generate Web Certs
+      shell: "source /etc/profile && cfssl gencert -ca=/etc/cfssl/ca.pem -ca-key=/etc/cfssl/ca-key.pem web.json | cfssljson -bare web"
       args:
         # creates: "{{ web_cert_path }}"
         chdir: /etc/nginx/ssl
@@ -344,7 +369,7 @@
         state: directory
         owner: root
         group: coredns
-        mode: 0774
+        mode: 0775
     - name: CoreDNS Configuration
       copy:
         dest: /etc/coredns/Corefile
@@ -357,13 +382,12 @@
             log
             errors
 
-            # HARDCODED
-            forward . 192.168.0.2 192.168.0.3
+            forward . 8.8.8.8
 
-            # hosts plugin with inline content
             hosts bootstrap.hosts {{ domain }}.{{ tld }} {
-              {{ floating_ip }} drone.{{ domain }}.{{ tld }}
-              {{ floating_ip }} git.{{ domain }}.{{ tld }}
+              {% for service in services %}
+              {{ floating_ip }} {{ service }}.{{ domain }}.{{ tld }}
+              {% endfor %}
               fallthrough
             }
           }
@@ -611,4 +635,161 @@
         daemon_reload: yes
         name: drone-agent
         state: started
+        enabled: yes
+
+    # === MINIO ===
+    - name: Download Minio server binary
+      get_url:
+        url: https://dl.minio.io/server/minio/release/linux-amd64/minio
+        dest: /opt/bin/minio
+        owner: root
+        group: root
+        mode: 0755
+    - name: Download minio client binary
+      get_url:
+        url: https://dl.minio.io/client/mc/release/linux-amd64/mc
+        dest: /opt/bin/mc
+        owner: root
+        group: root
+        mode: 0755
+    - name: Make a minio user
+      user:
+        name: minio
+        system: yes
+    - name: Ensure minio data folder exists
+      file:
+        path: /var/lib/minio
+        state: directory
+        owner: root
+        group: minio
+        mode: 0775
+    - name: Create minio environment file
+      copy:
+        dest: /etc/default/minio
+        owner: root
+        group: minio
+        mode: 0640
+        content: |
+          MINIO_ACCESS_KEY=admin
+          MINIO_SECRET_KEY=password
+          MINIO_VOLUMES=/var/lib/minio
+          MINIO_OPTS="--address 127.0.0.1:{{ minio_port }}"
+    - name: Copy minio systemd unit
+      copy:
+        dest: /etc/systemd/system/minio.service
+        owner: root
+        group: root
+        mode: 0644
+        content: |
+          [Unit]
+          Description=Miniohttps://coreos.com/os/docs/latest/using-environment-variables-in-systemd-units.html
+          Documentation=https://docs.minio.io
+          Wants=network-online.target
+          After=network-online.target
+          AssertFileIsExecutable=/opt/bin/minio
+
+          [Service]
+          WorkingDirectory=/usr/local/
+
+          User=minio
+          Group=minio
+
+          PermissionsStartOnly=true
+
+          EnvironmentFile=-/etc/default/minio
+          ExecStartPre=/bin/bash -c "[ -n \"${MINIO_VOLUMES}\" ] || echo \"Variable MINIO_VOLUMES not set in /etc/default/minio\""
+
+          ExecStart=/opt/bin/minio server $MINIO_OPTS $MINIO_VOLUMES
+          # ExecStart=/opt/bin/minio server --address 127.0.0.1:{{ minio_port }} /var/lib/minio
+
+          # Let systemd restart this service only if it has ended with the clean exit code or signal.
+          Restart=on-success
+
+          StandardOutput=journal
+          StandardError=inherit
+
+          # Specifies the maximum file descriptor number that can be opened by this process
+          LimitNOFILE=65536
+
+          # Disable timeout logic and wait until process is stopped
+          TimeoutStopSec=0
+
+          # SIGTERM signal is used to stop Minio
+          KillSignal=SIGTERM
+
+          SendSIGKILL=no
+
+          SuccessExitStatus=0
+
+          [Install]
+          WantedBy=multi-user.target
+    - name: Start Minio service
+      service:
+        daemon_reload: yes
+        name: minio
+        state: started
+        enabled: yes
+    - name: Copy minio nginx conf
+      template:
+        src: nginx-reverse-proxy.conf
+        dest: /etc/nginx/conf.d/minio.conf
+        owner: root
+        group: root
+        mode: 0644
+      vars:
+        server_name: minio.{{ domain }}.{{ tld }}
+        port: "{{ minio_port }}"
+        ssl_certificate: "{{ web_cert_path }}"
+        ssl_certificate_key: "{{ web_tls_key_path }}"
+
+
+  post_tasks:
+    - name: Ensure /var/lib/iptables exists
+      file:
+        path: /var/lib/iptables
+        state: directory
+        owner: root
+        group: root
+        mode: 0755
+    - name: Create DOCKER-USER iptables-save file
+      copy:
+        dest: /var/lib/iptables/docker-user.save
+        owner: root
+        group: root
+        mode: 0644
+        content: |
+          *filter
+          :DOCKER-USER - [0:0]
+          -A DOCKER-USER -p tcp -m tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+          -A DOCKER-USER -j RETURN
+          COMMIT
+    - name: Create clamp-mss systemd unit
+      copy:
+        dest: /etc/systemd/system/clamp-mss.service
+        owner: root
+        group: root
+        mode: 0644
+        content: |
+          [Unit]
+          Description=Clamp MSS on DOCKER-USER chain
+          After=docker.service
+          Requires=docker.service
+
+          [Service]
+          Type=oneshot
+          ExecStart=/sbin/iptables-restore -T filter --noflush /var/lib/iptables/docker-user.save
+
+          [Install]
+          WantedBy=basic.target
+    - name: Start clamp-mss service
+      service:
+        daemon_reload: yes
+        name: clamp-mss
+        state: started
+        enabled: yes
+    - name: Restart Docker service
+      service:
+        daemon_reload: yes
+        name: docker
+        state: restarted
         enabled: yes

@@ -69,6 +69,7 @@ resource "openstack_compute_instance_v2" "bootstrap" {
 
   /* user_data = "${data.template_file.cromwell_user_data.rendered}" */
 
+  // TODO: http(s), DNS:53
   security_groups = [
     "default",
     "${openstack_networking_secgroup_v2.ssh.name}",

@@ -100,7 +100,7 @@ what it does). Some general skills you may want to review are:
 7. Run the playbook against the host terraform provisioned:
 
   ```bash
-  ansible-playbook --inventory-file=$(which terraform-inventory) --user ubuntu --private-key ./bootstrap ./playbook/bootstrap.yml
+  ansible-playbook --inventory-file=$(which terraform-inventory) --user ubuntu --private-key ./bootstrap --extra-vars "@vars.yml" ./playbook/bootstrap.yml
   ```
 
   Alternatively, `-i "$(terraform output floating_ip),"` would have worked as well.
@@ -119,13 +119,23 @@ what it does). Some general skills you may want to review are:
   delete it with `certutil -D -n $CERT_NICK -d $CERT_DB` (Or naively add a
   security exception ;)
 
+  You can also add the cert to your system wide root certificate / trust policy store.
+
+  On Arch:
+
+  ```bash
+  # remove with --remove
+  # https://bbs.archlinux.org/viewtopic.php?id=235724
+  sudo trust anchor ./playbook/cacerts/$(terraform output floating_ip)/etc/cfssl/ca.pem
+  ```
+
 10. Add the DNS server to your local configuration: add
 
   ```bash
   echo "nameserver $(terraform output floating_ip)"
   ```
 
-  to the top of `/etc/resolv.conf`.
+  to the top of `/etc/resolv.conf`. We could also use `xip.io` or `sslip.io`.
 
 11. Visit `git.<domain>.<tld>`. You can install from there or submit the request yourself:
 
@@ -239,6 +249,14 @@ what it does). Some general skills you may want to review are:
 
   ```bash
   docker inspect <container_name> | jq '.[] | .Config.Env'
+  ```
+
+- Subnet pools:
+
+  ```
+  openstack network create mynet
+  openstack subnet pool create --pool-prefix 10.100.0.0/16 --default-prefix-length 24 mynet
+  for n in a b c; do openstack subnet create --subnet-pool mynet --network mynet mynet_$n; done
   ```
 
 ## TODOS
