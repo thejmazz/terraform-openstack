@@ -1,0 +1,3 @@
+- src: https://github.com/jlund/ansible-go
+- src: angstwad.docker_ubuntu
+- src: geerlingguy.postgresql
